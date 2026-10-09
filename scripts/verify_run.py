@@ -38,8 +38,18 @@ from tradingagents.default_config import DEFAULT_CONFIG
 
 # "1,234억 5,678만 달러", "-3억 달러", "마이너스 10억 9,200만 달러": Korean amounts in USD.
 _AMOUNT = re.compile(r"(마이너스\s*|-)?(?:(\d[\d,]*)조\s*)?(?:(\d[\d,]*)억)?\s*(?:(\d[\d,]*)만)?\s*달러")
-_PRICE = re.compile(r"\$\s?(\d[\d,]*\.\d+)B?|(\d[\d,]*\.\d+)\s?달러")
+# "$331.8B", "$1.2T", "$67B": a scaled dollar figure, compared in USD millions.
+_SCALED = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)\s?([MBT])\b")
+_SCALE = {"M": 1, "B": 1_000, "T": 1_000_000}
+# "$522.61", "522.61달러": a price or per-share figure.
+_PRICE = re.compile(r"\$\s?(\d[\d,]*\.\d+)(?!\d|\.\d|\s?[MBT]\b)|(\d[\d,]*\.\d+)\s?달러")
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s?%")
+
+
+def _half_unit(figure: str) -> float:
+    """Half the last printed digit: "331.8" is anything that rounds to it, within 0.05."""
+    decimals = len(figure.split(".")[1]) if "." in figure else 0
+    return 0.5 * 10 ** -decimals
 
 
 def replay_tool_calls(ticker: str, day: str, results_dir: Path, out: Path) -> list[str]:
@@ -117,18 +127,24 @@ def check_reports(report_dir: Path, numbers: set[float]) -> None:
             counts["amount"] += 1
             if not (near(millions, tol) or near(-millions, tol)):
                 unmatched["amount"].append((name, m.group(0).strip(), context(m)))
+        # Each figure matches anything that rounds to it at the precision it was printed with.
+        for m in _SCALED.finditer(text):
+            figure, scale = m.group(1).replace(",", ""), _SCALE[m.group(2)]
+            counts["scaled $"] += 1
+            if not near(float(figure) * scale, _half_unit(figure) * scale):
+                unmatched["scaled $"].append((name, m.group(0), context(m)))
         for m in _PRICE.finditer(text):
-            value = float((m.group(1) or m.group(2)).replace(",", ""))
+            figure = (m.group(1) or m.group(2)).replace(",", "")
             counts["price"] += 1
-            if not (near(value, 0.005) or near(value * 1000, 0.5)):  # "$96.221B" is 96,221 million
+            if not near(float(figure), _half_unit(figure)):
                 unmatched["price"].append((name, m.group(0), context(m)))
         for m in _PERCENT.finditer(text):
             counts["percent"] += 1
-            if not near(float(m.group(1)), 0.005):
+            if not near(float(m.group(1)), _half_unit(m.group(1))):
                 unmatched["percent"].append((name, m.group(0), context(m)))
 
     print(f"numbers checked in {report_dir}: {dict(counts)}")
-    for kind in ("amount", "price", "percent"):
+    for kind in ("amount", "scaled $", "price", "percent"):
         seen = set()
         items = [item for item in unmatched[kind] if (item[0], item[1]) not in seen and not seen.add((item[0], item[1]))]
         print(f"\n### {kind}: {len(items)} not literally in the data (recompute or trace each)")
