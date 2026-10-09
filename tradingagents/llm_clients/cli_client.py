@@ -23,7 +23,9 @@ offers a read-only shell inside the empty directory.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -41,6 +43,8 @@ from pydantic import Field
 from .base_client import BaseLLMClient
 from .cli_process import CLIOutputLimitError, run_cli_subprocess
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
 
 CLI_PROVIDERS = {"codex-cli": "codex", "claude-cli": "claude"}
 
@@ -63,6 +67,54 @@ Available tools:
 
 _TRANSIENT = ("429", "500", "502", "503", "529", "rate limit", "overloaded", "temporarily",
               "service unavailable", "connection reset", "timed out", "stream disconnected")
+
+# The instruction agents.context.get_language_instruction() puts in every prompt
+# whose output reaches the report. A run asked for Korean once got an analyst's
+# report in Kazakh, so a reply to such a prompt is checked for its script.
+_LANGUAGE_ASKED = re.compile(r"Write your entire response in ([^,.\n]+)")
+_HANGUL = re.compile(r"[\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]")
+_KANA = re.compile(r"[\u3040-\u30ff]")
+_HAN = re.compile(r"[\u4e00-\u9fff]")
+_LATIN = re.compile(r"[A-Za-z\u00c0-\u024f]")
+# Each language's own letters; None for a Latin-script language. Others are not judged.
+_SCRIPTS: dict[str, re.Pattern | None] = {
+    "korean": _HANGUL,
+    "japanese": re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]"),
+    "chinese": _HAN,
+    "hindi": re.compile(r"[\u0900-\u097f]"),
+    "arabic": re.compile(r"[\u0600-\u06ff]"),
+    "russian": re.compile(r"[\u0400-\u04ff]"),
+    **dict.fromkeys(("english", "spanish", "portuguese", "french", "german"), None),
+}
+# Reports keep tickers, indicator names and labelled lines in English, so the
+# asked-for script is a share of the letters, not all of them: Korean reports
+# run 0.6 to 0.96 Hangul, the Kazakh one 0.
+_MIN_SHARE = 0.3
+_MIN_LETTERS = 100
+
+
+def reply_language_matches(text: str, language: str) -> bool:
+    """Whether ``text`` is written in ``language``'s script; short or unknown cases pass."""
+    script = _SCRIPTS.get(language.strip().lower(), False)
+    letters = "".join(c for c in text if c.isalpha())
+    if script is False or len(letters) < _MIN_LETTERS:
+        return True
+    if script is None:
+        return len(_LATIN.findall(letters)) >= (1 - _MIN_SHARE) * len(letters)
+    if script is _SCRIPTS["japanese"] and not _KANA.search(letters):
+        return False  # Han alone reads as Chinese
+    return len(script.findall(letters)) >= _MIN_SHARE * len(letters)
+
+
+def _prose(message: AIMessage, required: bool) -> str:
+    """The text a reader sees: the answer, or a forced (structured) call's string fields."""
+    if not message.tool_calls:
+        return _text(message.content)
+    if not required:
+        return ""  # a data request, not prose
+    return " ".join(str(v) for call in message.tool_calls for v in call["args"].values()
+                    if isinstance(v, str))
+
 
 _SLOTS_GUARD = threading.Lock()
 _SLOTS: dict[int, threading.BoundedSemaphore] = {}
@@ -231,26 +283,42 @@ class CLIChatModel(BaseChatModel):
             names, required = _tool_names(tools, tool_choice)
             schema = tool_reply_schema(names)
             prompt = f"{prompt}\n\n{_tool_section(tools, names, required)}"
-        message = self._call_with_retries(prompt, schema, names, required)
+        asked = _LANGUAGE_ASKED.search(prompt)
+        message = self._call_with_retries(prompt, schema, names, required,
+                                          asked.group(1).strip() if asked else None)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
-    def _call_with_retries(self, prompt, schema, names, required) -> AIMessage:
+    def _call_with_retries(self, prompt, schema, names, required, language=None) -> AIMessage:
         last_error: Exception | None = None
+        wrong_language: AIMessage | None = None
         for attempt in range(self.max_retries + 1):
             if attempt:
                 time.sleep(self.backoff_seconds * 2 ** (attempt - 1))
             try:
                 reply = self._run_once(prompt, schema)
-                if schema is None:
-                    return AIMessage(content=reply)
-                return parse_tool_reply(reply, names, required)
-            except (CLIReplyError, subprocess.TimeoutExpired) as exc:
+                message = (AIMessage(content=reply) if schema is None
+                           else parse_tool_reply(reply, names, required))
+                if language and not reply_language_matches(_prose(message, required), language):
+                    wrong_language = message
+                    raise CLIReplyError(f"reply is not in {language}")
+                return message
+            except CLIReplyError as exc:
+                last_error = exc
+                if wrong_language is not None and "Write the whole answer in" not in prompt:
+                    prompt = (f"{prompt}\n\n[Reminder]\nWrite the whole answer in {language}, "
+                              "as the instructions above ask.")
+            except subprocess.TimeoutExpired as exc:
                 last_error = exc
             except RuntimeError as exc:
                 # codex echoes the prompt on stderr; only the tail holds the error.
                 if not any(token in str(exc)[-300:].lower() for token in _TRANSIENT):
                     raise
                 last_error = exc
+        if wrong_language is not None:
+            # Its figures still hold; losing the run would cost more than the language.
+            logger.warning("%s CLI reply is not in %s after %d attempts; keeping it",
+                           self.backend, language, self.max_retries + 1)
+            return wrong_language
         raise RuntimeError(f"{self.backend} CLI failed after {self.max_retries + 1} attempts: "
                            f"{last_error}") from last_error
 
