@@ -24,6 +24,7 @@ from tradingagents.llm_clients.cli_client import (
     CLIClient,
     messages_to_prompt,
     parse_tool_reply,
+    reply_language_matches,
 )
 
 FAKE_CLI = """#!{python}
@@ -425,3 +426,102 @@ def test_real_codex_calls_a_bound_tool():
 
     assert result.tool_calls and result.tool_calls[0]["name"] == "get_news"
     assert result.tool_calls[0]["args"].get("ticker") == "NVDA"
+
+
+# ---- reply language ---------------------------------------------------------
+
+
+KOREAN = "엔비디아의 최근 분기 매출은 크게 늘었고 영업이익률도 높은 수준을 유지했습니다. " * 4
+KAZAKH = "NVDA фундаментальды талдауы: түсім өсті, операциялық маржа жоғары деңгейде сақталды. " * 4
+ASK_KOREAN = [SystemMessage("Analyze NVDA. Write your entire response in Korean, except the labelled lines."),
+              HumanMessage("NVDA")]
+
+
+def test_the_language_check_tells_scripts_apart():
+    assert reply_language_matches(KOREAN, "Korean")
+    assert not reply_language_matches(KAZAKH, "Korean")
+    assert not reply_language_matches("The quarter was strong and margins held up well. " * 4, "Korean")
+    assert reply_language_matches("El trimestre fue fuerte y los márgenes se mantuvieron. " * 4, "Spanish")
+    assert not reply_language_matches(KOREAN, "Spanish")
+    assert reply_language_matches("決算は好調で、利益率も高い水準を維持しました。" * 6, "Japanese")
+    assert not reply_language_matches("季度业绩强劲，利润率保持在高位。" * 8, "Japanese")
+
+
+def test_short_replies_and_unknown_languages_are_not_judged():
+    assert reply_language_matches("Hold", "Korean")
+    assert reply_language_matches(KAZAKH, "Vietnamese")
+
+
+def test_a_reply_in_the_wrong_language_is_asked_for_again(fake_cli):
+    """A run asked for Korean got one analyst's report in Kazakh."""
+    command, set_replies, calls = fake_cli
+    set_replies({"text": KAZAKH}, {"text": KOREAN})
+
+    result = codex(command, max_retries=1).invoke(ASK_KOREAN)
+
+    assert result.content == KOREAN.strip()
+    assert len(calls()) == 2
+    assert "Write the whole answer in Korean" not in calls()[0]["stdin"]
+    assert "Write the whole answer in Korean" in calls()[1]["stdin"]
+
+
+def test_a_final_report_with_tools_bound_is_checked_too(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(content=KAZAKH), tool_reply(content=KOREAN))
+
+    result = codex(command, max_retries=1).bind_tools([get_news]).invoke(ASK_KOREAN)
+
+    assert result.content == KOREAN
+    assert len(calls()) == 2
+
+
+def test_structured_output_prose_is_checked(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(calls=[("Verdict", {"rating": "Buy", "reason": KAZAKH})]),
+                tool_reply(calls=[("Verdict", {"rating": "Buy", "reason": KOREAN})]))
+
+    verdict = codex(command, max_retries=1).with_structured_output(Verdict).invoke(ASK_KOREAN)
+
+    assert verdict.reason == KOREAN
+    assert len(calls()) == 2
+
+
+def test_tool_calls_are_not_judged_by_language(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(calls=[("get_news", {"ticker": "NVDA"})]))
+
+    codex(command, max_retries=1).bind_tools([get_news]).invoke(ASK_KOREAN)
+
+    assert len(calls()) == 1
+
+
+def test_without_a_language_instruction_any_language_passes(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies({"text": KAZAKH})
+
+    codex(command, max_retries=1).invoke([HumanMessage("Reflect on the decision in English.")])
+
+    assert len(calls()) == 1
+
+
+def test_a_wrong_language_that_persists_is_kept_with_a_warning_not_fatal(fake_cli, caplog):
+    """The figures in a mis-languaged report still hold; losing the run would cost more."""
+    command, set_replies, calls = fake_cli
+    set_replies({"text": KAZAKH})
+
+    with caplog.at_level("WARNING"):
+        result = codex(command, max_retries=1).invoke(ASK_KOREAN)
+
+    assert result.content == KAZAKH.strip()
+    assert len(calls()) == 2
+    assert "not in Korean" in caplog.text
+
+
+def test_the_check_reads_the_instruction_the_agents_actually_send(monkeypatch):
+    """If the wording in agents.context drifts, the check would silently switch off."""
+    from tradingagents.agents import context
+    from tradingagents.llm_clients.cli_client import _LANGUAGE_ASKED
+
+    monkeypatch.setattr("tradingagents.dataflows.config.get_config", lambda: {"output_language": "Korean"})
+
+    assert _LANGUAGE_ASKED.search(context.get_language_instruction()).group(1).strip() == "Korean"
