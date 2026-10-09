@@ -361,3 +361,59 @@ def test_a_row_filed_only_year_to_date_keeps_its_figure_beside_a_row_filed_by_qu
     assert rows["2026-06-30 (6 months YTD)"]["Capital Expenditure"] == ""
     assert rows["2026-06-30 (3 months)"]["Capital Expenditure"] == "10"
     assert rows["2026-06-30 (3 months)"]["Operating Cash Flow"] == ""
+
+
+def _cashflow(monkeypatch, ocf, capex):
+    facts = {"facts": {"us-gaap": {
+        "NetCashProvidedByUsedInOperatingActivities": {"units": {"USD": ocf}},
+        "PaymentsToAcquirePropertyPlantAndEquipment": {"units": {"USD": capex}},
+    }}}
+    monkeypatch.setattr(sec_edgar, "_fetch_json",
+                        lambda url: TICKER_MAP if "company_tickers" in url else facts)
+    return sec_edgar.get_cashflow("AAPL", "quarterly", "2026-09-28")
+
+
+@pytest.mark.unit
+def test_free_cash_flow_is_the_printed_cells_difference_on_the_same_row(monkeypatch):
+    """A model subtracting 8282 from 8634 wrote 852 and the debate repeated it.
+    The difference is served, taken from the printed figures so it checks by eye."""
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-06-30", 8_634_400_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [_fact("2026-06-30", 8_281_600_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+    )
+
+    (row,) = _rows(out)
+    assert (row["Operating Cash Flow"], row["Capital Expenditure"]) == ("8634", "8282")
+    assert row["Free Cash Flow (OCF - CapEx)"] == "352"
+    assert "Free Cash Flow is Operating Cash Flow minus Capital Expenditure" in out
+
+
+@pytest.mark.unit
+def test_free_cash_flow_is_blank_unless_both_figures_are_on_the_row(monkeypatch):
+    """A quarter's capex beside a year-to-date cash flow is not one period's difference."""
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-06-30", 120_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [_fact("2026-06-30", 10_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-04-01")],
+    )
+
+    assert [row["Free Cash Flow (OCF - CapEx)"] for row in _rows(out)] == ["", ""]
+
+
+@pytest.mark.unit
+def test_no_free_cash_flow_column_without_capital_expenditure(monkeypatch):
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-06-30", 120_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-04-01")],
+        [],
+    )
+
+    assert "Free Cash Flow" not in out
+    assert _header(out) == ["period", "Operating Cash Flow"]
+
+
+@pytest.mark.unit
+def test_other_statements_have_no_free_cash_flow_column():
+    assert "Free Cash Flow" not in sec_edgar.get_income_statement("AAPL", "annual", "2024-11-15")
+    assert "Free Cash Flow" not in sec_edgar.get_balance_sheet("AAPL", "annual", "2024-11-15")

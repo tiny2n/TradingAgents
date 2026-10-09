@@ -82,6 +82,8 @@ _SPANS = {"quarterly": (60, 115), "annual": (300, 400)}
 # subtracts one filing from another, which would give a figure no filing states.
 _YEAR_TO_DATE = ((150, 200, 6), (240, 290, 9))
 
+_FREE_CASH_FLOW = "Free Cash Flow (OCF - CapEx)"
+
 # A fiscal year is a period an annual report covers. A 10-Q balance has no span
 # to reject, and some filers' 10-Qs report twelve-month totals that pass the span
 # check, so either would read as a fiscal year. The value is still the latest
@@ -237,17 +239,30 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         )
     if untagged:
         header.append(f"# Unavailable (not tagged by this filer): {', '.join(untagged)}")
+    # A model subtracting capex from operating cash flow got the digits wrong and
+    # the debate repeated its figure, so the difference is served. It is taken
+    # from the two printed cells of one row, one filing's period and span, so it
+    # checks by eye and never mixes a quarter with a year to date.
+    free_cash_flow = "Operating Cash Flow" in tagged and "Capital Expenditure" in tagged
+    columns = [label if unit == "USD" else f"{label} ({unit})" for label, (_, unit) in tagged.items()]
+    if free_cash_flow:
+        columns.append(_FREE_CASH_FLOW)
+        header.append("# Free Cash Flow is Operating Cash Flow minus Capital Expenditure on the same "
+                      "row, computed here from those two figures, not filed.")
     # One row per period rather than one column: across dozens of period columns
     # a reader counting cells along a line item quotes a neighbouring period.
-    rows = [",".join(["period"] + [label if unit == "USD" else f"{label} ({unit})"
-                                   for label, (_, unit) in tagged.items()])]
+    rows = [",".join(["period", *columns])]
     for end, index in reversed(periods):
-        cells = []
+        cells = {}
         for label, (values, unit) in tagged.items():
             value = values.get((end, index)) if chosen[label].get(end) == index else None
             # Plain numbers: a thousands separator would split the CSV field.
-            cells.append("" if value is None else f"{value / 1e6:.0f}" if unit == "USD" else f"{value:.2f}")
-        rows.append(",".join([end + names[index]] + cells))
+            cells[label] = "" if value is None else f"{value / 1e6:.0f}" if unit == "USD" else f"{value:.2f}"
+        row = list(cells.values())
+        if free_cash_flow:
+            ocf, capex = cells["Operating Cash Flow"], cells["Capital Expenditure"]
+            row.append(str(int(ocf) - int(capex)) if ocf and capex else "")
+        rows.append(",".join([end + names[index], *row]))
     return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n"
 
 
