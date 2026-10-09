@@ -337,8 +337,10 @@ def test_a_cash_flow_filed_year_to_date_is_served_with_its_span(monkeypatch):
 
     out = sec_edgar.get_cashflow("AAPL", "quarterly", "2026-09-28")
 
-    assert _columns(out) == ["2025-12-27", "2026-03-28 (6 months YTD)", "2026-06-27 (9 months YTD)"]
-    assert [row["Operating Cash Flow"] for row in _rows(out)] == ["81000", "53000", "30000"]
+    assert _periods(out) == ["2026-06-27 (9 months YTD)", "2026-06-27 (3 months derived)",
+                             "2026-03-28 (6 months YTD)", "2026-03-28 (3 months derived)",
+                             "2025-12-27 (3 months)"]
+    assert [row["Operating Cash Flow"] for row in _rows(out)] == ["81000", "28000", "53000", "23000", "30000"]
     assert "not quarters and not full fiscal years" in out
 
 
@@ -417,3 +419,84 @@ def test_no_free_cash_flow_column_without_capital_expenditure(monkeypatch):
 def test_other_statements_have_no_free_cash_flow_column():
     assert "Free Cash Flow" not in sec_edgar.get_income_statement("AAPL", "annual", "2024-11-15")
     assert "Free Cash Flow" not in sec_edgar.get_balance_sheet("AAPL", "annual", "2024-11-15")
+
+
+@pytest.mark.unit
+def test_a_quarter_filed_only_year_to_date_is_derived_from_the_rows_below(monkeypatch):
+    """A model subtracting Q1 from the half year to get Q2 capex wrote 5,735 for
+    8,282 - 2,493 = 5,789. The quarter is served, labelled as derived, from the
+    printed figures of the two rows it subtracts, so it checks by eye."""
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-03-31", 3_937_000_000, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+         _fact("2026-06-30", 8_634_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [_fact("2026-03-31", 2_493_000_000, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+         _fact("2026-06-30", 8_282_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+    )
+
+    rows = {row["period"]: row for row in _rows(out)}
+    q2 = rows["2026-06-30 (3 months derived)"]
+    assert (q2["Operating Cash Flow"], q2["Capital Expenditure"]) == ("4697", "5789")
+    assert q2["Free Cash Flow (OCF - CapEx)"] == "-1092"
+    notes = [line for line in out.splitlines() if line.startswith("#")]
+    assert any(line.startswith('# "(3 months derived)" rows') for line in notes)
+
+
+@pytest.mark.unit
+def test_no_quarter_is_derived_where_one_was_filed(monkeypatch):
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-03-31", 30_000_000, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+         _fact("2026-06-30", 50_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-04-01"),
+         _fact("2026-06-30", 80_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [],
+    )
+
+    assert _periods(out) == ["2026-06-30 (3 months)", "2026-03-31 (3 months)"]
+    assert "derived" not in out
+
+
+@pytest.mark.unit
+def test_no_quarter_is_derived_without_the_row_it_subtracts(monkeypatch):
+    """A half year with no first quarter on file gives no second quarter."""
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-06-30", 80_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [],
+    )
+
+    assert _periods(out) == ["2026-06-30 (6 months YTD)"]
+
+
+@pytest.mark.unit
+def test_a_quarter_filed_after_the_run_date_is_not_subtracted(monkeypatch):
+    """Both rows a derived quarter subtracts must be on file by the run date."""
+    out = _cashflow(
+        monkeypatch,
+        [_fact("2026-03-31", 30_000_000, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+         _fact("2026-06-30", 80_000_000, "2026-10-01", form="10-Q", fp="Q2", start="2026-01-01")],
+        [],
+    )
+
+    assert _periods(out) == ["2026-03-31 (3 months)"]
+
+
+@pytest.mark.unit
+def test_per_share_figures_are_not_derived(monkeypatch):
+    """Earnings per share do not subtract: the share count differs between spans."""
+    facts = {"facts": {"us-gaap": {
+        "NetIncomeLoss": {"units": {"USD": [
+            _fact("2026-03-31", 400_000_000, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+            _fact("2026-06-30", 1_000_000_000, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")]}},
+        "EarningsPerShareDiluted": {"units": {"USD/shares": [
+            _fact("2026-03-31", 0.13, "2026-04-30", form="10-Q", fp="Q1", start="2026-01-01"),
+            _fact("2026-06-30", 0.45, "2026-08-01", form="10-Q", fp="Q2", start="2026-01-01")]}},
+    }}}
+    monkeypatch.setattr(sec_edgar, "_fetch_json",
+                        lambda url: TICKER_MAP if "company_tickers" in url else facts)
+
+    rows = {row["period"]: row for row in _rows(sec_edgar.get_income_statement("AAPL", "quarterly", "2026-09-28"))}
+
+    derived = rows["2026-06-30 (3 months derived)"]
+    assert derived["Net Income"] == "600"
+    assert derived["Diluted EPS (USD/shares)"] == ""

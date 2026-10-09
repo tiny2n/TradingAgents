@@ -78,9 +78,16 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
 _SPANS = {"quarterly": (60, 115), "annual": (300, 400)}
 
 # A 10-Q's cash flows are often filed only year to date. A quarterly table takes
-# the quarter where filed, else the span to date, named in the column; it never
-# subtracts one filing from another, which would give a figure no filing states.
+# the quarter where filed, else the span to date, named on its row.
 _YEAR_TO_DATE = ((150, 200, 6), (240, 290, 9))
+
+# A quarter filed only inside a year to date is still asked for, and a model doing
+# the subtraction itself got it wrong (8,282 - 2,493 written as 5,735), so the
+# table serves it: the year to date less the span to date one quarter earlier,
+# both on file by the run date, on a row labelled derived. Per-share figures are
+# not derived, since the share count differs between the spans.
+_DERIVED = -1
+_QUARTER_APART = (75, 105)
 
 _FREE_CASH_FLOW = "Free Cash Flow (OCF - CapEx)"
 
@@ -207,10 +214,10 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     balance = kind == "balance_sheet"
     if quarterly:
         spans = (_SPANS["quarterly"], *((low, high) for low, high, _ in _YEAR_TO_DATE))
-        names = ["" if balance else " (3 months)",
-                 *(f" ({months} months YTD)" for _, _, months in _YEAR_TO_DATE)]
+        names = {0: "" if balance else " (3 months)", _DERIVED: " (3 months derived)",
+                 **{i: f" ({months} months YTD)" for i, (_, _, months) in enumerate(_YEAR_TO_DATE, 1)}}
     else:
-        spans, names = (_SPANS["annual"],), ["" if balance else " (fiscal year)"]
+        spans, names = (_SPANS["annual"],), {0: "" if balance else " (fiscal year)"}
     forms = () if quarterly else _ANNUAL_FORMS
     lines = {label: _as_of(us_gaap, tags, as_of_date, spans, forms) for label, tags in _STATEMENTS[kind]}
     # Each row takes the shortest span it reports for a period, and a column
@@ -220,7 +227,9 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     for label, (values, _) in lines.items():
         for end, index in values:
             chosen[label][end] = min(index, chosen[label].get(end, index))
-    periods = sorted({(end, index) for spans_of in chosen.values() for end, index in spans_of.items()})
+    derived = _derived_quarters(lines, chosen) if quarterly and not balance else {}
+    periods = sorted({(end, index) for spans_of in chosen.values() for end, index in spans_of.items()}
+                     | {(end, _DERIVED) for by_end in derived.values() for end in by_end})
     if not periods:
         raise NoMarketDataError(ticker, ticker, f"no {freq} {title.lower()} filed by {as_of_date}")
 
@@ -236,6 +245,12 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
             '# "(3 months)" rows are single quarters. "(6 months YTD)" and "(9 months YTD)" rows are '
             "fiscal year-to-date totals, not quarters and not full fiscal years. A fiscal fourth "
             'quarter is filed only inside the full year: ask for freq="annual".'
+        )
+    if derived:
+        header.append(
+            '# "(3 months derived)" rows are quarters filed only inside a year to date: the '
+            "year-to-date row of that date less the year-to-date or quarter row one quarter "
+            "earlier, computed here from their printed figures, not filed."
         )
     if untagged:
         header.append(f"# Unavailable (not tagged by this filer): {', '.join(untagged)}")
@@ -255,15 +270,43 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     for end, index in reversed(periods):
         cells = {}
         for label, (values, unit) in tagged.items():
+            if index == _DERIVED:
+                value = derived.get(label, {}).get(end)
+                cells[label] = "" if value is None else str(value)
+                continue
             value = values.get((end, index)) if chosen[label].get(end) == index else None
             # Plain numbers: a thousands separator would split the CSV field.
-            cells[label] = "" if value is None else f"{value / 1e6:.0f}" if unit == "USD" else f"{value:.2f}"
+            cells[label] = "" if value is None else _millions(value) if unit == "USD" else f"{value:.2f}"
         row = list(cells.values())
         if free_cash_flow:
             ocf, capex = cells["Operating Cash Flow"], cells["Capital Expenditure"]
             row.append(str(int(ocf) - int(capex)) if ocf and capex else "")
         rows.append(",".join([end + names[index], *row]))
     return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n"
+
+
+def _millions(value: float) -> str:
+    return f"{value / 1e6:.0f}"
+
+
+def _derived_quarters(lines: dict, chosen: dict) -> dict[str, dict[str, int]]:
+    """{label: {period end: quarter}} for USD lines whose quarter is filed only to date."""
+    derived: dict[str, dict[str, int]] = {}
+    for label, (values, unit) in lines.items():
+        if unit != "USD":
+            continue
+        for end, index in values:
+            # A filed quarter, or a year to date shadowed by one, needs nothing derived.
+            if index == 0 or chosen[label].get(end) != index:
+                continue
+            closing = date.fromisoformat(end)
+            earlier = [e for e, i in values if i == index - 1
+                       and _QUARTER_APART[0] <= (closing - date.fromisoformat(e)).days <= _QUARTER_APART[1]]
+            if earlier:
+                # From the printed figures, so the subtraction checks by eye.
+                quarter = int(_millions(values[(end, index)])) - int(_millions(values[(max(earlier), index - 1)]))
+                derived.setdefault(label, {})[end] = quarter
+    return derived
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", as_of_date: str | None = None) -> str:
