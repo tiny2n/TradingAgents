@@ -199,11 +199,16 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         raise NoMarketDataError(ticker, ticker, "US filer with no us-gaap facts")
 
     quarterly = freq.lower() == "quarterly"
+    # A balance is a point in time and its row is named by the date alone; a
+    # duration row names its span, so a quarter, a year to date and a fiscal year
+    # read apart on the row itself.
+    balance = kind == "balance_sheet"
     if quarterly:
         spans = (_SPANS["quarterly"], *((low, high) for low, high, _ in _YEAR_TO_DATE))
-        names = ["", *(f" ({months} months)" for _, _, months in _YEAR_TO_DATE)]
+        names = ["" if balance else " (3 months)",
+                 *(f" ({months} months YTD)" for _, _, months in _YEAR_TO_DATE)]
     else:
-        spans, names = (_SPANS["annual"],), [""]
+        spans, names = (_SPANS["annual"],), ["" if balance else " (fiscal year)"]
     forms = () if quarterly else _ANNUAL_FORMS
     lines = {label: _as_of(us_gaap, tags, as_of_date, spans, forms) for label, tags in _STATEMENTS[kind]}
     # Each row takes the shortest span it reports for a period, and a column
@@ -217,24 +222,33 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     if not periods:
         raise NoMarketDataError(ticker, ticker, f"no {freq} {title.lower()} filed by {as_of_date}")
 
-    header = (
-        f"# {title} for {ticker.upper()} ({freq}), USD in millions unless the row says otherwise\n"
-        f"# SEC EDGAR facts filed on or before {as_of_date}, at the values filed then\n\n"
-    )
-    rows = [",".join([""] + [end + names[index] for end, index in periods])]
-    for label, (values, unit) in lines.items():
-        # Every row spans the same columns, or a reader lines the table up wrong.
-        if not values:
-            rows.append(",".join([label] + ["unavailable (not tagged by this filer)"] * len(periods)))
-            continue
-        name = label if unit == "USD" else f"{label} ({unit})"
-        # Plain numbers: a thousands separator would split the CSV field.
+    tagged = {label: line for label, line in lines.items() if line[0]}
+    untagged = [label for label in lines if label not in tagged]
+    header = [
+        f"# {title} for {ticker.upper()} ({freq}), USD in millions unless the column says otherwise",
+        f"# SEC EDGAR facts filed on or before {as_of_date}, at the values filed then",
+        "# One row per period, newest first; every figure is on the row that names its period.",
+    ]
+    if quarterly and not balance:
+        header.append(
+            '# "(3 months)" rows are single quarters. "(6 months YTD)" and "(9 months YTD)" rows are '
+            "fiscal year-to-date totals, not quarters and not full fiscal years. A fiscal fourth "
+            'quarter is filed only inside the full year: ask for freq="annual".'
+        )
+    if untagged:
+        header.append(f"# Unavailable (not tagged by this filer): {', '.join(untagged)}")
+    # One row per period rather than one column: across dozens of period columns
+    # a reader counting cells along a line item quotes a neighbouring period.
+    rows = [",".join(["period"] + [label if unit == "USD" else f"{label} ({unit})"
+                                   for label, (_, unit) in tagged.items()])]
+    for end, index in reversed(periods):
         cells = []
-        for end, index in periods:
+        for label, (values, unit) in tagged.items():
             value = values.get((end, index)) if chosen[label].get(end) == index else None
+            # Plain numbers: a thousands separator would split the CSV field.
             cells.append("" if value is None else f"{value / 1e6:.0f}" if unit == "USD" else f"{value:.2f}")
-        rows.append(",".join([name] + cells))
-    return header + "\n".join(rows) + "\n"
+        rows.append(",".join([end + names[index]] + cells))
+    return "\n".join(header) + "\n\n" + "\n".join(rows) + "\n"
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", as_of_date: str | None = None) -> str:

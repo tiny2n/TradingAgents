@@ -184,6 +184,9 @@ def parse_tool_reply(reply, names: list[str], required: bool) -> AIMessage:
                       "type": "tool_call"})
     if required and not calls:
         raise CLIReplyError("CLI was required to call a tool and called none")
+    # Neither a call nor an answer: an analyst would file it as an empty report.
+    if not calls and not content.strip():
+        raise CLIReplyError("CLI called no tool and gave no answer")
     return AIMessage(content=content, tool_calls=calls)
 
 

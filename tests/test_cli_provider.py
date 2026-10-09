@@ -265,6 +265,19 @@ def test_parse_rejects_unknown_tools_bad_arguments_and_a_missing_required_call()
         parse_tool_reply(reply([]), ["get_news"], True)
     with pytest.raises(CLIReplyError, match="not the tool-call JSON"):
         parse_tool_reply("plain text", ["get_news"], False)
+    with pytest.raises(CLIReplyError, match="no tool and gave no answer"):
+        parse_tool_reply(json.dumps({"content": "  ", "tool_calls": []}), ["get_news"], False)
+
+
+def test_an_empty_reply_with_tools_bound_is_retried_not_filed_as_a_report(fake_cli):
+    """An analyst whose first turn came back empty filed an empty report and the run went on."""
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(content=""), tool_reply(calls=[("get_news", {"ticker": "TSLA"})]))
+
+    result = codex(command, max_retries=1).bind_tools([get_news]).invoke("analyze TSLA")
+
+    assert result.tool_calls[0]["name"] == "get_news"
+    assert len(calls()) == 2
 
 
 # ---- retries ----------------------------------------------------------------
