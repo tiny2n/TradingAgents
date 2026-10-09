@@ -31,6 +31,10 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    # codex-cli / claude-cli providers.
+    "TRADINGAGENTS_CLI_EFFORT":              "cli_effort",
+    "TRADINGAGENTS_CLI_TIMEOUT":             "cli_timeout",
+    "TRADINGAGENTS_CLI_MAX_CONCURRENCY":     "cli_max_concurrency",
 }
 
 
@@ -109,6 +113,12 @@ def build_default_config() -> dict:
         "google_thinking_level": None,      # "high", "minimal", etc.
         "openai_reasoning_effort": None,    # "medium", "high", "low"
         "anthropic_effort": None,           # "high", "medium", "low"
+        # codex-cli / claude-cli: reasoning effort (codex model_reasoning_effort,
+        # claude --effort; None = the CLI's default), seconds per CLI run, and how
+        # many CLI processes run at once across both tiers.
+        "cli_effort": None,
+        "cli_timeout": 600,
+        "cli_max_concurrency": 2,
         # Sampling temperature, forwarded to every provider when set. None leaves
         # each provider at its own default. Lower values reduce run-to-run
         # variation on models that honor it; reasoning models largely ignore it

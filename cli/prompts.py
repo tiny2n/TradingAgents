@@ -379,6 +379,9 @@ def _llm_provider_table() -> list[tuple[str, str, str | None]]:
         ("Amazon Bedrock", "bedrock", None),
         ("Ollama", "ollama", ollama_url),
         ("OpenAI-compatible (vLLM, LM Studio, llama.cpp, custom relay)", "openai_compatible", None),
+        # Run through the locally installed CLI and its subscription login; no API key.
+        ("Codex CLI (ChatGPT login, no API key)", "codex-cli", None),
+        ("Claude Code CLI (Claude login, no API key)", "claude-cli", None),
     ]
 
 

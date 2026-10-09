@@ -49,6 +49,10 @@ def create_llm_client(
         from .bedrock_client import BedrockClient
         return BedrockClient(model, base_url, **kwargs)
 
+    if provider_lower in ("codex-cli", "claude-cli"):
+        from .cli_client import CLIClient
+        return CLIClient(model, base_url, provider=provider_lower, **kwargs)
+
     from .openai_client import OpenAIClient, is_openai_compatible
     if is_openai_compatible(provider_lower):
         return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)
@@ -106,6 +110,13 @@ def build_llm_kwargs(config: dict) -> dict[str, Any]:
         effort = config.get("anthropic_effort")
         if effort:
             kwargs["effort"] = effort
+
+    elif provider in ("codex-cli", "claude-cli"):
+        for key, name in (("cli_effort", "effort"), ("cli_timeout", "timeout"),
+                          ("cli_max_concurrency", "max_concurrency")):
+            value = config.get(key)
+            if value is not None and value != "":
+                kwargs[name] = value
 
     # Sampling temperature is cross-provider: forward it whenever set.
     # float() here so a value coming from a TRADINGAGENTS_TEMPERATURE env

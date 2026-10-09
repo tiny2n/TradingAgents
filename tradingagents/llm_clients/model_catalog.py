@@ -221,6 +221,33 @@ MODEL_OPTIONS: ProviderModeOptions = {
     "nvidia": _CUSTOM_ONLY,
     # Bedrock model IDs / cross-region inference profile IDs are user-specified.
     "bedrock": _CUSTOM_ONLY,
+    # Subscription CLIs: the models the logged-in account serves (see `codex` /
+    # `claude --model`), so any other ID the CLI accepts runs too.
+    "codex-cli": {
+        "quick": [
+            ("GPT-6 Luna - Fast, high-volume", "gpt-6-luna"),
+            ("GPT-5.6 Terra - Balances intelligence and speed", "gpt-5.6-terra"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("GPT-6 Sol - Complex reasoning and analysis", "gpt-6-sol"),
+            ("GPT-6.1 Sol - Latest Sol", "gpt-6.1-sol"),
+            ("GPT-6 Astra - Hardest multi-step reasoning", "gpt-6-astra"),
+            ("Custom model ID", "custom"),
+        ],
+    },
+    "claude-cli": {
+        "quick": [
+            ("Sonnet - Claude Code's current Sonnet", "sonnet"),
+            ("Haiku - Claude Code's current Haiku", "haiku"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("Opus - Claude Code's current Opus", "opus"),
+            ("Sonnet - Claude Code's current Sonnet", "sonnet"),
+            ("Custom model ID", "custom"),
+        ],
+    },
 }
 
 
