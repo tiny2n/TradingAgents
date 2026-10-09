@@ -39,10 +39,11 @@ from tradingagents.default_config import DEFAULT_CONFIG
 # "1,234억 5,678만 달러", "-3억 달러", "마이너스 10억 9,200만 달러": Korean amounts in USD.
 _AMOUNT = re.compile(r"(마이너스\s*|-)?(?:(\d[\d,]*)조\s*)?(?:(\d[\d,]*)억)?\s*(?:(\d[\d,]*)만)?\s*달러")
 # "$331.8B", "$1.2T", "$67B": a scaled dollar figure, compared in USD millions.
-_SCALED = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)\s?([MBT])\b")
+# Not \b after the letter: a Korean particle ("$84.9B였고") is a word character.
+_SCALED = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)\s?([MBT])(?![A-Za-z])")
 _SCALE = {"M": 1, "B": 1_000, "T": 1_000_000}
 # "$522.61", "522.61달러": a price or per-share figure.
-_PRICE = re.compile(r"\$\s?(\d[\d,]*\.\d+)(?!\d|\.\d|\s?[MBT]\b)|(\d[\d,]*\.\d+)\s?달러")
+_PRICE = re.compile(r"\$\s?(\d[\d,]*\.\d+)(?!\d|\.\d|\s?[MBT](?![A-Za-z]))|(\d[\d,]*\.\d+)\s?달러")
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s?%")
 
 

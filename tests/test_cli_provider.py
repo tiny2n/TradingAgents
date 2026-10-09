@@ -153,6 +153,14 @@ def test_codex_runs_in_an_empty_directory_that_is_removed(fake_cli):
 
 # ---- emulated tool calling --------------------------------------------------
 
+AFTER_A_TOOL_RESULT = [
+    HumanMessage("analyze NVDA"),
+    AIMessage(content="", tool_calls=[{"name": "get_news", "args": {"ticker": "NVDA"},
+                                       "id": "call_1", "type": "tool_call"}]),
+    ToolMessage(content="NVDA headline", name="get_news", tool_call_id="call_1"),
+]
+
+
 def test_bound_tools_come_back_as_real_tool_calls(fake_cli):
     command, set_replies, calls = fake_cli
     set_replies(tool_reply(calls=[("get_stock_data", {"symbol": "NVDA", "start_date": "2026-09-01",
@@ -184,13 +192,14 @@ def test_the_reply_schema_lists_only_the_bound_tool_names(fake_cli):
 
 
 def test_a_final_answer_with_tools_bound_has_no_tool_calls(fake_cli):
-    command, set_replies, _ = fake_cli
+    command, set_replies, calls = fake_cli
     set_replies(tool_reply(content="final report"))
 
-    result = codex(command).bind_tools([get_news]).invoke("hi")
+    result = codex(command).bind_tools([get_news]).invoke(AFTER_A_TOOL_RESULT)
 
     assert result.content == "final report"
     assert result.tool_calls == []
+    assert len(calls()) == 1
 
 
 def test_tool_calls_and_results_reach_the_cli_as_text():
@@ -287,7 +296,7 @@ def test_a_malformed_reply_is_retried(fake_cli):
     command, set_replies, calls = fake_cli
     set_replies({"text": "not json"}, tool_reply(content="final"))
 
-    result = codex(command, max_retries=1).bind_tools([get_news]).invoke("hi")
+    result = codex(command, max_retries=1).bind_tools([get_news]).invoke(AFTER_A_TOOL_RESULT)
 
     assert result.content == "final"
     assert len(calls()) == 2
@@ -469,7 +478,7 @@ def test_a_final_report_with_tools_bound_is_checked_too(fake_cli):
     command, set_replies, calls = fake_cli
     set_replies(tool_reply(content=KAZAKH), tool_reply(content=KOREAN))
 
-    result = codex(command, max_retries=1).bind_tools([get_news]).invoke(ASK_KOREAN)
+    result = codex(command, max_retries=1).bind_tools([get_news]).invoke([*ASK_KOREAN, *AFTER_A_TOOL_RESULT[1:]])
 
     assert result.content == KOREAN
     assert len(calls()) == 2
@@ -525,3 +534,51 @@ def test_the_check_reads_the_instruction_the_agents_actually_send(monkeypatch):
     monkeypatch.setattr("tradingagents.dataflows.config.get_config", lambda: {"output_language": "Korean"})
 
     assert _LANGUAGE_ASKED.search(context.get_language_instruction()).group(1).strip() == "Korean"
+
+
+
+# ---- tool use ---------------------------------------------------------------
+
+def test_with_tools_bound_the_note_points_at_them_not_at_the_message():
+    """A news analyst read "everything you need is in this message", called no
+    tool, and reported that its data tools were not connected."""
+    bound = messages_to_prompt([HumanMessage("analyze GOOGL")], tools_bound=True)
+    plain = messages_to_prompt([HumanMessage("analyze GOOGL")])
+
+    assert "everything you need is in this message" not in bound
+    assert "[Tools]" in bound and "tool_calls" in bound
+    assert "everything you need is in this message" in plain
+
+
+def test_a_first_answer_that_called_no_tool_is_asked_again(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(content="The data tools are not connected, so no report."),
+                tool_reply(calls=[("get_news", {"ticker": "GOOGL"})]))
+
+    result = codex(command, max_retries=1).bind_tools([get_news]).invoke("analyze GOOGL")
+
+    assert result.tool_calls[0]["name"] == "get_news"
+    assert len(calls()) == 2
+    assert "you have not called any yet" not in calls()[0]["stdin"]
+    assert "you have not called any yet" in calls()[1]["stdin"]
+
+
+def test_an_answer_after_a_tool_result_is_not_asked_again(fake_cli):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(content="final report"))
+
+    codex(command, max_retries=1).bind_tools([get_news]).invoke(AFTER_A_TOOL_RESULT)
+
+    assert len(calls()) == 1
+
+
+def test_a_first_answer_that_never_calls_a_tool_is_kept_with_a_warning(fake_cli, caplog):
+    command, set_replies, calls = fake_cli
+    set_replies(tool_reply(content="no data, so Hold"))
+
+    with caplog.at_level("WARNING"):
+        result = codex(command, max_retries=1).bind_tools([get_news]).invoke("analyze GOOGL")
+
+    assert result.content == "no data, so Hold"
+    assert len(calls()) == 2
+    assert "called no tool" in caplog.text

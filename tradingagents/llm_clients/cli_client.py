@@ -52,6 +52,16 @@ _NO_OWN_TOOLS = (
     "You are running as a text-generation backend. Do not use any tools of your own "
     "(shell, files, web search, sub-agents): everything you need is in this message."
 )
+# With tools bound, "everything you need is in this message" read as "there is no
+# data to fetch": a news analyst called no tool and reported its tools unconnected.
+_NO_OWN_TOOLS_BUT_THESE = (
+    "You are running as a text-generation backend. Do not use any tools of your own "
+    "(shell, files, web search, sub-agents). The tools listed under [Tools] below are "
+    "connected: request data by listing calls in tool_calls, and the caller runs them "
+    "and sends back their results."
+)
+_CALL_THE_TOOLS = ("Call the tools listed under [Tools] for the data before you write the "
+                   "answer; you have not called any yet.")
 
 _TOOL_PROTOCOL = """[Tools]
 You cannot run the tools below yourself. To use them, list the calls in "tool_calls" \
@@ -142,9 +152,9 @@ def _text(content) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def messages_to_prompt(messages: list[BaseMessage]) -> str:
+def messages_to_prompt(messages: list[BaseMessage], tools_bound: bool = False) -> str:
     """The conversation as labelled plain text, tool calls and results included."""
-    parts = [f"[Operating note]\n{_NO_OWN_TOOLS}"]
+    parts = [f"[Operating note]\n{_NO_OWN_TOOLS_BUT_THESE if tools_bound else _NO_OWN_TOOLS}"]
     for message in messages:
         text = _text(message.content)
         if isinstance(message, ToolMessage):
@@ -277,20 +287,26 @@ class CLIChatModel(BaseChatModel):
             raise ValueError("CLI models do not support stop sequences")
         if kwargs:
             raise ValueError(f"Unsupported CLI call options: {sorted(kwargs)}")
-        prompt = messages_to_prompt(messages)
+        bound = bool(tools) and tool_choice != "none"
+        prompt = messages_to_prompt(messages, tools_bound=bound)
         names, required, schema = [], False, None
-        if tools and tool_choice != "none":
+        if bound:
             names, required = _tool_names(tools, tool_choice)
             schema = tool_reply_schema(names)
             prompt = f"{prompt}\n\n{_tool_section(tools, names, required)}"
         asked = _LANGUAGE_ASKED.search(prompt)
+        # Before any tool result an answer cannot rest on tool data; a forced call is exempt.
+        first_turn = bound and not required and not any(isinstance(m, ToolMessage) for m in messages)
         message = self._call_with_retries(prompt, schema, names, required,
-                                          asked.group(1).strip() if asked else None)
+                                          asked.group(1).strip() if asked else None, first_turn)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
-    def _call_with_retries(self, prompt, schema, names, required, language=None) -> AIMessage:
+    def _call_with_retries(self, prompt, schema, names, required, language=None,
+                           first_turn=False) -> AIMessage:
         last_error: Exception | None = None
-        wrong_language: AIMessage | None = None
+        # A reply that parsed but falls short (no tool called first, wrong language)
+        # is asked for again with a reminder, and kept if every attempt falls short.
+        kept: AIMessage | None = None
         for attempt in range(self.max_retries + 1):
             if attempt:
                 time.sleep(self.backoff_seconds * 2 ** (attempt - 1))
@@ -298,15 +314,15 @@ class CLIChatModel(BaseChatModel):
                 reply = self._run_once(prompt, schema)
                 message = (AIMessage(content=reply) if schema is None
                            else parse_tool_reply(reply, names, required))
-                if language and not reply_language_matches(_prose(message, required), language):
-                    wrong_language = message
-                    raise CLIReplyError(f"reply is not in {language}")
-                return message
+                problem = self._shortfall(message, required, language, first_turn)
+                if problem is None:
+                    return message
+                kept, (reason, reminder) = message, problem
+                if reminder not in prompt:
+                    prompt = f"{prompt}\n\n[Reminder]\n{reminder}"
+                raise CLIReplyError(reason)
             except CLIReplyError as exc:
                 last_error = exc
-                if wrong_language is not None and "Write the whole answer in" not in prompt:
-                    prompt = (f"{prompt}\n\n[Reminder]\nWrite the whole answer in {language}, "
-                              "as the instructions above ask.")
             except subprocess.TimeoutExpired as exc:
                 last_error = exc
             except RuntimeError as exc:
@@ -314,13 +330,23 @@ class CLIChatModel(BaseChatModel):
                 if not any(token in str(exc)[-300:].lower() for token in _TRANSIENT):
                     raise
                 last_error = exc
-        if wrong_language is not None:
-            # Its figures still hold; losing the run would cost more than the language.
-            logger.warning("%s CLI reply is not in %s after %d attempts; keeping it",
-                           self.backend, language, self.max_retries + 1)
-            return wrong_language
+        if kept is not None:
+            # A usable reply beats a failed run: its figures still hold.
+            logger.warning("%s CLI %s after %d attempts; keeping it",
+                           self.backend, last_error, self.max_retries + 1)
+            return kept
         raise RuntimeError(f"{self.backend} CLI failed after {self.max_retries + 1} attempts: "
                            f"{last_error}") from last_error
+
+    @staticmethod
+    def _shortfall(message, required, language, first_turn) -> tuple[str, str] | None:
+        """(reason, reminder) when a parsed reply should be asked for again, else None."""
+        if first_turn and not message.tool_calls:
+            return "reply called no tool before answering", _CALL_THE_TOOLS
+        if language and not reply_language_matches(_prose(message, required), language):
+            return (f"reply is not in {language}",
+                    f"Write the whole answer in {language}, as the instructions above ask.")
+        return None
 
     def _run_once(self, prompt: str, schema: dict | None):
         """One CLI run: the final text, or the parsed JSON object when ``schema`` is set."""
